@@ -63,13 +63,10 @@ class T_UPS():
 
         self.include_dmat = include_dmat
         if self.include_dmat:
-            self.initialise_spatial_rdm2_op()
             self.initialise_spatial_rdm1_op()
             self.initialise_spin_rdm1_op()
+        if plev>0: print('Density Matrix Operators Generated')
         
-
-
-
         # Current position
         self.x = np.zeros(self.dim)
         self.update()
@@ -143,7 +140,7 @@ class T_UPS():
             strlst = [f"+_{i}" for i in range(self.no_alpha)] + [f"+_{i+self.no_spat}" for i in range(self.no_beta)]
 
         init_op = FermionicOp({" ".join(strlst): 1.0}, num_spin_orbitals=self.no_spin)
-        mat_init_op = jw().map(init_op).to_matrix().real
+        mat_init_op = jw().map(init_op).to_matrix(sparse=True).real
         self.wf_ref = mat_init_op @ wf_vac
         if self.use_proj:
             self.wf_ref = self.mat_proj.T @ self.wf_ref
@@ -197,8 +194,6 @@ class T_UPS():
             if(self.include_doubles):
                 self.kop_ij[count] = self.get_doubles_matrix(0,self.no_spat-1)
                 count += 1
-
-
         
     def initialise_op_order(self):
         self.op_order = []
@@ -269,10 +264,10 @@ class T_UPS():
                 op += FermionicOp({f"-_{s} -_{r+self.no_spat}": 1.0}, num_spin_orbitals=self.no_spin)
                 op += FermionicOp({f"-_{s+self.no_spat} -_{r+self.no_spat}": 1.0}, num_spin_orbitals=self.no_spin)
                 op += FermionicOp({f"-_{s} -_{r}": 1.0}, num_spin_orbitals=self.no_spin)
-                mat_op = jw().map(op).to_matrix().real
+                mat_op = jw().map(op).to_matrix(sparse=True).real
                 if self.use_proj:
                     mat_op = mat_op @ self.mat_proj
-                self.doubly_rm_mat[r,s,:,:] = mat_op
+                self.doubly_rm_mat[r,s,:,:] = mat_op.todense()
     
     def initialise_spatial_rdm1_op(self):
         if self.use_proj:
@@ -282,10 +277,10 @@ class T_UPS():
         for r in range(self.no_spat):
             op = FermionicOp({f"-_{r}": 1.0}, num_spin_orbitals=self.no_spin)
             op += FermionicOp({f"-_{r+self.no_spat}": 1.0}, num_spin_orbitals=self.no_spin)
-            mat_op = jw().map(op).to_matrix().real
+            mat_op = jw().map(op).to_matrix(sparse=True).real
             if self.use_proj:
                     mat_op = mat_op @ self.mat_proj
-            self.singly_rm_mat_spat[r,:,:] = mat_op
+            self.singly_rm_mat_spat[r,:,:] = mat_op.todense()
     
     def initialise_spin_rdm1_op(self):
         if self.use_proj:
@@ -294,16 +289,16 @@ class T_UPS():
             self.singly_rm_mat_spin = np.zeros((self.no_spin,self.N,self.N))
         for r in range(self.no_spin):
             op = FermionicOp({f"-_{r}": 1.0}, num_spin_orbitals=self.no_spin)
-            mat_op = jw().map(op).to_matrix().real
+            mat_op = jw().map(op).to_matrix(sparse=True).real
             if self.use_proj:
                     mat_op = mat_op @ self.mat_proj
-            self.singly_rm_mat_spin[r,:,:] = mat_op
+            self.singly_rm_mat_spin[r,:,:] = mat_op.todense()
     
     def spat_rdm1_mo(self):
         ket = self.singly_rm_mat_spat @ self.wfn
         density_mat = np.einsum('pi, ri->pr', ket, ket)
         return density_mat
-    
+
     def spin_rdm1_mo(self):
         ket = self.singly_rm_mat_spin @ self.wfn
         density_mat = np.einsum('pi, ri->pr', ket, ket)
