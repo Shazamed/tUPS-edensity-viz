@@ -1,9 +1,10 @@
 import numpy as np
 from qiskit_nature.second_q.operators import FermionicOp
 from qiskit_nature.second_q.mappers import JordanWignerMapper as jw
-from scipy.sparse import csc_matrix
+from scipy.sparse import csc_matrix, lil_matrix
 from scipy.sparse.linalg import expm, expm_multiply, gmres
 import itertools
+import pyscf
 
 
 class T_UPS():
@@ -59,13 +60,15 @@ class T_UPS():
 
         self.Cmo = Cmo
         if self.perf_pair:
-            self.Cmo = self.Cmo[:,[0,3,1,4,2,5]]
+            self.Cmo = self.Cmo[:,[0,5,1,4,2,3]]
+        
+        self.hamiltonian_mo(mol)
 
-        self.include_dmat = include_dmat
-        if self.include_dmat:
-            self.initialise_spatial_rdm1_op()
-            self.initialise_spin_rdm1_op()
-        if plev>0: print('Density Matrix Operators Generated')
+        # self.include_dmat = include_dmat
+        # if self.include_dmat:
+            # self.initialise_spatial_rdm1_op()
+            # self.initialise_spin_rdm1_op()
+        # if plev>0: print('Density Matrix Operators Generated')
         
         # Current position
         self.x = np.zeros(self.dim)
@@ -75,6 +78,11 @@ class T_UPS():
     def dim(self):
         """Dimension of parameter vector, x"""
         return len(self.op_order)
+        
+    @property
+    def energy(self):
+        E = np.conj(self.wfn) @ self.mat_H @ self.wfn
+        return E
     
     def take_step(self,step):
         """Take a step in parameter space"""
@@ -122,6 +130,42 @@ class T_UPS():
         xstep = 0.1*(np.random.rand(self.dim)-0.5)
         self.take_step(xstep)
         self.update()
+    
+    def hamiltonian_mo(self, mol):
+        '''Initialises the Hamiltonian matrix for given MOs'''
+        # get integrals
+        vnuc = mol.energy_nuc() # constant term
+        
+        oei = mol.intor('int1e_nuc') + mol.intor('int1e_kin')
+        hpq  = np.linalg.multi_dot([self.Cmo.T, oei, self.Cmo]) # <p|h|q>
+
+        eri = mol.intor("int2e", aosym="s1")
+        eri_pqrs = pyscf.ao2mo.incore.full(eri, self.Cmo) # <pq|rs>
+        eri_pqrs = eri_pqrs.transpose(0,2,1,3)
+
+        H = FermionicOp({'':vnuc},num_spin_orbitals=self.no_spin)
+
+        # one electron
+        for q in range(self.no_spat):
+            for p in range(self.no_spat):
+                H += FermionicOp({f"+_{p} -_{q}": hpq[p,q]}, num_spin_orbitals=self.no_spin)
+                H += FermionicOp({f"+_{p+self.no_spat} -_{q+self.no_spat}": hpq[p,q]}, num_spin_orbitals=self.no_spin)
+
+        # two electron
+        for s in range(self.no_spat):
+            for r in range(self.no_spat):
+                for q in range(self.no_spat):
+                    for p in range(self.no_spat):
+                        H += 0.5*FermionicOp({f"+_{p} +_{q+self.no_spat} -_{s+self.no_spat} -_{r}": eri_pqrs[p,q,r,s]}, num_spin_orbitals=self.no_spin)
+                        H += 0.5*FermionicOp({f"+_{p+self.no_spat} +_{q} -_{s} -_{r+self.no_spat}": eri_pqrs[p,q,r,s]}, num_spin_orbitals=self.no_spin)
+                        H += 0.5*FermionicOp({f"+_{p+self.no_spat} +_{q+self.no_spat} -_{s+self.no_spat} -_{r+self.no_spat}": eri_pqrs[p,q,r,s]}, num_spin_orbitals=self.no_spin)
+                        H += 0.5*FermionicOp({f"+_{p} +_{q} -_{s} -_{r}": eri_pqrs[p,q,r,s]}, num_spin_orbitals=self.no_spin)
+            
+        # Save as a matrix
+        self.mat_H = jw().map(H).to_matrix(sparse=True).real
+
+        if self.use_proj:
+            self.mat_H = csc_matrix(self.mat_proj.T @ (self.mat_H @ self.mat_proj))
 
     def initialise_ref(self):
         '''Initialises the HF reference state'''
@@ -245,12 +289,11 @@ class T_UPS():
             proj_indices.append(int(''.join(x),2))
         # sort indices from lowest to highest
         proj_indices.sort()
-
         # construct projector matrix and dimension of reduced space
-        self.mat_proj = np.zeros((self.N, len(proj_indices)))
+        self.mat_proj = lil_matrix((self.N, len(proj_indices)))
         for j, idx in enumerate(proj_indices):
-            self.mat_proj[idx][j] = 1
-        self.mat_proj = csc_matrix(self.mat_proj)
+            self.mat_proj[idx,j] = 1
+        self.mat_proj = self.mat_proj.tocsc()
         self.proj_N = len(proj_indices)
     
     def initialise_spatial_rdm2_op(self):
@@ -294,9 +337,22 @@ class T_UPS():
                     mat_op = mat_op @ self.mat_proj
             self.singly_rm_mat_spin[r,:,:] = mat_op.todense()
     
+    # def spat_rdm1_mo(self):
+    #     ket = self.singly_rm_mat_spat @ self.wfn
+    #     density_mat = np.einsum('pi, ri->pr', ket, ket)
+    #     return density_mat
+
     def spat_rdm1_mo(self):
-        ket = self.singly_rm_mat_spat @ self.wfn
-        density_mat = np.einsum('pi, ri->pr', ket, ket)
+        density_mat = np.zeros((self.no_spat,self.no_spat))
+        for p in range(self.no_spat):
+            for q in range(self.no_spat):
+                op = FermionicOp({f"+_{q} -_{p}": 1.0}, num_spin_orbitals=self.no_spin)
+                op += FermionicOp({f"+_{q+self.no_spat} -_{p+self.no_spat}": 1.0}, num_spin_orbitals=self.no_spin)
+                mat_op = jw().map(op).to_matrix(sparse=True).real
+                if self.use_proj:
+                    mat_op = self.mat_proj.T @ mat_op @ self.mat_proj
+                gamma_pq = self.wfn.T @ mat_op @ self.wfn
+                density_mat[p,q] = gamma_pq
         return density_mat
 
     def spin_rdm1_mo(self):
